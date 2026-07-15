@@ -7,4 +7,5 @@ from .BrowseActionExecutor import BrowseActionExecutor
 from .NodeJSActionExecutor import NodeJSActionExecutor
 from .CodeRuntimeActionExecutor import CodeRuntimeActionExecutor
 from .DockerActionExecutor import DockerActionExecutor
+from .SandboxActionExecutor import SandboxActionExecutor
 from .SQLiteActionExecutor import SQLiteActionExecutor

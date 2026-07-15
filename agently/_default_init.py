@@ -33,6 +33,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         MCPActionExecutor,
         NodeJSActionExecutor,
         PythonSandboxActionExecutor,
+        SandboxActionExecutor,
         SQLiteActionExecutor,
         SearchActionExecutor,
     )
@@ -59,6 +60,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionExecutor", NodeJSActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", CodeRuntimeActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", DockerActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", SandboxActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SQLiteActionExecutor, activate=False)
     plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", MCPExecutionResourceProvider, activate=False)
