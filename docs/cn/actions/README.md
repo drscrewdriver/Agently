@@ -7,5 +7,6 @@
 3. [ExecutionResource](execution-environment.md)：面向 Action、TriggerFlow 与插件开发者的高级托管 MCP/sandbox/process/browser/SQLite 资源。
 4. [工具兼容](tools.md)：旧 `tool_func` / `use_tools` 别名的现状。
 5. [MCP](mcp.md)：把 MCP server 挂成 action。
+6. [Sandbox Plugin](../sandbox/README.md)：容器级沙箱执行环境（Docker / gVisor）。
 
 模型请求需要调用模型外部能力时读这个文件夹。主要问题是多步骤编排时读 [TriggerFlow](../triggerflow/)。如果你在判断一个变更应该属于 core、plugin、built-in action 还是 Agent Component，请读 [Architecture / 扩展边界](../architecture/extension-boundaries.md)。
