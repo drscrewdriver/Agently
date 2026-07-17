@@ -173,3 +173,8 @@ AGENTS.md
 .*/
 !.github/
 !.github/**
+
+# Seatbelt TDD artifacts (local verification only)
+tests/test_seatbelt_bugs.py
+/docs/bug-reports/
+test_seatbelt_verify.py
