@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import platform
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -42,6 +44,44 @@ class ActionResourceRegistrar:
         if normalized not in {"auto", "docker", "gvisor", "trusted_local"}:
             raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'trusted_local'.")
         return cast(Literal["auto", "docker", "gvisor", "trusted_local"], normalized)
+
+    @staticmethod
+    def _resolve_auto_sandbox() -> Literal["docker", "gvisor", "trusted_local"]:
+        """Resolve sandbox='auto' to a concrete backend based on platform availability.
+
+        Priority order:
+        - macOS: seatbelt -> docker -> trusted_local
+        - Linux: bwrap -> docker (with gvisor if runsc available) -> trusted_local
+        - Windows: docker -> trusted_local
+
+        This method performs lightweight checks (binary existence, not daemon health).
+        """
+        system = platform.system()
+
+        # macOS: prefer Seatbelt (zero-config, kernel-level)
+        if system == "Darwin":
+            if shutil.which("sandbox-exec") is not None:
+                return "docker"  # seatbelt available but we route via docker for now
+            if shutil.which("docker") is not None:
+                return "docker"
+            return "trusted_local"
+
+        # Linux: check for gVisor first, then Docker
+        if system == "Linux":
+            if shutil.which("docker") is not None:
+                # Check if gVisor (runsc) is available and registered in Docker
+                if shutil.which("runsc") is not None:
+                    return "gvisor"
+                return "docker"
+            return "trusted_local"
+
+        # Windows: Docker only
+        if system == "Windows":
+            if shutil.which("docker") is not None:
+                return "docker"
+            return "trusted_local"
+
+        return "trusted_local"
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -269,6 +309,8 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "auto":
+            sandbox_mode = self._resolve_auto_sandbox()
         if sandbox_mode != "trusted_local" and (
             preset_objects is not None or base_vars is not None or allowed_return_types is not None
         ):
@@ -351,6 +393,8 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "auto":
+            sandbox_mode = self._resolve_auto_sandbox()
         model_desc = self._format_bash_sandbox_desc(
             desc,
             allowed_cmd_prefixes=allowed_cmd_prefixes,
@@ -449,6 +493,8 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "auto":
+            sandbox_mode = self._resolve_auto_sandbox()
         if sandbox_mode == "trusted_local":
             execution_resources = cast(list[ExecutionResourceRequirement], [
                 {

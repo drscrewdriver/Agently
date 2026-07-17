@@ -38,7 +38,7 @@ from agently.base import action as global_action
 P = ParamSpec("P")
 R = TypeVar("R")
 CapabilityDescMode: TypeAlias = Literal["append", "override", "default"]
-CodeSandboxMode: TypeAlias = Literal["auto", "docker", "trusted_local"]
+CodeSandboxMode: TypeAlias = Literal["auto", "docker", "gvisor", "trusted_local"]
 DependencyPolicyMode: TypeAlias = Literal["deny", "request", "install"]
 ProvisioningProfileMode: TypeAlias = Literal["strict", "developer", "ci"]
 ImagePullPolicyMode: TypeAlias = Literal["never", "request", "if_missing", "always"]
