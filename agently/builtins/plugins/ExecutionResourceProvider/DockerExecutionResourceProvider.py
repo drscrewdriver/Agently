@@ -147,6 +147,10 @@ def get_code_runtime_profile(language: str, *, image: str | None = None) -> dict
 
 
 class DockerExecutionResource:
+    # Supported runtime backends for Docker-based sandbox execution.
+    # "runc" is the standard Docker runtime; "runsc" is gVisor (user-space kernel).
+    SUPPORTED_RUNTIMES = ("runc", "runsc")
+
     def __init__(
         self,
         *,
@@ -154,11 +158,13 @@ class DockerExecutionResource:
         timeout: int = 60,
         default_args: list[str] | None = None,
         runtime_profile: dict[str, Any] | None = None,
+        runtime: str = "runc",
     ):
         self.docker_binary = docker_binary
         self.timeout = timeout
         self.default_args = default_args or []
         self.runtime_profile = dict(runtime_profile or {})
+        self.runtime = runtime if runtime in self.SUPPORTED_RUNTIMES else "runc"
         self._prepared_images: dict[str, dict[str, Any]] = {}
 
     def is_binary_available(self):
@@ -463,6 +469,9 @@ class DockerExecutionResource:
         env: dict[str, str] | None = None,
     ) -> list[str]:
         args = [self.docker_binary, "run", "--rm", *self.default_args]
+        # Inject --runtime flag when using a non-default runtime (e.g. gVisor/runsc).
+        if self.runtime != "runc" and f"--runtime" not in " ".join(self.default_args):
+            args.extend(["--runtime", self.runtime])
         network_mode = str(profile.get("network_mode", "disabled"))
         if network_mode == "disabled":
             args.extend(["--network", "none"])
@@ -553,6 +562,36 @@ class DockerExecutionResource:
             "stdout": result.stdout,
             "stderr": result.stderr,
             "diagnostics": [],
+        }
+
+    @staticmethod
+    def inspect_gvisor_availability() -> dict[str, Any]:
+        """Check whether gVisor (runsc) is available on the host."""
+        runsc_path = shutil.which("runsc")
+        if runsc_path is None:
+            return {"available": False, "reason": "runsc_binary_missing"}
+        try:
+            result = subprocess.run(
+                ["runsc", "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            version_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "unknown"
+        except Exception as error:
+            return {"available": False, "reason": "runsc_version_failed", "error": str(error)}
+        # Also verify Docker daemon recognises the runsc runtime.
+        try:
+            probe = subprocess.run(
+                ["docker", "info", "--format", "{{json .Runtimes}}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            runsc_in_daemon = "runsc" in (probe.stdout or "")
+        except Exception:
+            runsc_in_daemon = False
+        return {
+            "available": runsc_in_daemon,
+            "runsc_path": runsc_path,
+            "runsc_version": version_line,
+            "registered_in_docker": runsc_in_daemon,
         }
 
     async def run_python_code(self, *, python_code: str, timeout: int | None = None) -> dict[str, Any]:
@@ -877,11 +916,15 @@ class DockerExecutionResourceProvider:
         runtime_profile = config.get("runtime_profile", {})
         if not isinstance(runtime_profile, dict):
             runtime_profile = {}
+        runtime = str(config.get("runtime", "runc")).strip().lower()
+        if runtime not in DockerExecutionResource.SUPPORTED_RUNTIMES:
+            runtime = "runc"
         resource = DockerExecutionResource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
+            runtime=runtime,
         )
         availability = resource.ensure_available()
         active_profile = resource._profile()
@@ -889,6 +932,9 @@ class DockerExecutionResourceProvider:
         image = str(active_profile.get("image", ""))
         if image:
             image_preparation = resource.ensure_image_ready(image, profile=active_profile)
+        gvisor_info = {}
+        if resource.runtime == "runsc":
+            gvisor_info = resource.inspect_gvisor_availability()
         return {
             "handle_id": f"docker:{ uuid.uuid4().hex }",
             "resource": resource,
@@ -896,10 +942,12 @@ class DockerExecutionResourceProvider:
             "meta": {
                 "provider": self.name,
                 "docker_binary": resource.docker_binary,
+                "runtime": resource.runtime,
                 "available": True,
                 "availability": availability,
                 "runtime_profile": active_profile,
                 "image_preparation": image_preparation,
+                **({"gvisor": gvisor_info} if gvisor_info else {}),
             },
         }
 
