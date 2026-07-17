@@ -35,13 +35,13 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "trusted_local"] | str) -> Literal["auto", "docker", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
-        if normalized not in {"auto", "docker", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "trusted_local"], normalized)
+        if normalized not in {"auto", "docker", "gvisor", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "gvisor", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -101,6 +101,7 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         runtime_profile: dict[str, Any] | None = None,
+        docker_runtime: str = "runc",
     ) -> "ExecutionResourceRequirement":
         normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
         normalized_dependency_policy = (
@@ -141,6 +142,7 @@ class ActionResourceRegistrar:
                 "timeout": timeout,
                 "default_args": docker_default_args or [],
                 "runtime_profile": profile,
+                "runtime": docker_runtime,
             },
             "policy": self._docker_policy(default_policy, timeout=timeout),
         })
