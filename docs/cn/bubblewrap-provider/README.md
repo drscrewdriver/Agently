@@ -72,13 +72,71 @@ settings.set("code_execution.providers", [
 
 ## 隔离能力
 
-| 能力 | 支持 |
-|------|------|
-| 进程隔离 | ✅ (PID namespace) |
-| 文件系统隔离 | ✅ (mount namespace + bind mounts) |
-| 网络隔离 | ✅ (network namespace, 可配置) |
-| 用户隔离 | ✅ (user namespace) |
-| 资源限制 | ⚠️ (依赖 cgroup 配置) |
+### 限制范围设置
+
+| 能力 | 支持 | 说明 |
+|------|------|------|
+| 进程隔离 | ✅ | PID namespace，沙箱内进程独立 |
+| 文件系统隔离 | ✅ | mount namespace + bind mounts |
+| 网络隔离 | ✅ | network namespace，可配置共享 |
+| 用户隔离 | ✅ | user namespace，UID 映射 |
+| IPC 隔离 | ✅ | IPC namespace |
+| UTS 隔离 | ✅ | UTS namespace（主机名） |
+| cgroup 隔离 | ✅ | cgroup namespace |
+| 系统调用限制 | ❌ | bwrap 不做 seccomp，需额外配置 |
+| 权限提升阻止 | ✅ | user namespace 阻止提权 |
+
+### 配置参数详解
+
+```python
+BubblewrapCodeExecutionResource(
+    # === 文件系统限制 ===
+    bind_ro=["/usr/share/data"],      # 只读绑定到沙箱
+    bind_rw=["/var/work"],            # 读写绑定到沙箱
+    tmpfs=["/tmp", "/run"],           # tmpfs 挂载点
+    
+    # === 命名空间隔离 ===
+    unshare_all=True,                 # 隔离所有命名空间（推荐）
+    share_net=False,                  # 共享宿主机网络（默认隔离）
+    
+    # === 进程控制 ===
+    clearenv=False,                   # 清除所有环境变量
+    new_session=True,                 # 创建新会话（阻止 SIGHUP 传播）
+    die_with_parent=True,             # 父进程退出时终止沙箱
+    
+    # === 高级选项 ===
+    extra_bwrap_args=["--size", "1G"], # 额外 bwrap 参数
+)
+```
+
+### 默认只读绑定
+
+以下系统目录默认只读绑定到沙箱（如存在）：
+- `/usr` — 用户程序
+- `/bin` — 基本命令
+- `/sbin` — 系统命令
+- `/lib`, `/lib64` — 共享库
+- `/etc/alternatives` — 替代链接
+
+### `async_probe` 返回的能力信息
+
+```python
+{
+    "capabilities": {
+        "isolation": {
+            "process_contained": True,           # 进程被限制
+            "host_filesystem_restricted": True,  # 宿主机文件系统受限
+            "privilege_escalation_blocked": True, # 阻止权限提升
+            "syscalls_restricted": False,        # 系统调用未限制
+            "mechanism": "bubblewrap",
+            "network_mode": "configurable",      # 网络可配置
+        },
+        "workspace_access_modes": ["snapshot", "read_only", "read_write"],
+        "network": "configurable",
+        "safety_class": "isolated",
+    }
+}
+```
 
 ---
 

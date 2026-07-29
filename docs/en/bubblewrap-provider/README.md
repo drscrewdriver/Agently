@@ -72,13 +72,71 @@ settings.set("code_execution.providers", [
 
 ## Isolation Capabilities
 
-| Capability | Support |
-|------------|---------|
-| Process isolation | ✅ (PID namespace) |
-| Filesystem isolation | ✅ (mount namespace + bind mounts) |
-| Network isolation | ✅ (network namespace, configurable) |
-| User isolation | ✅ (user namespace) |
-| Resource limits | ⚠️ (depends on cgroup config) |
+### Restriction Scope
+
+| Capability | Support | Description |
+|------------|---------|-------------|
+| Process isolation | ✅ | PID namespace, sandbox processes are isolated |
+| Filesystem isolation | ✅ | mount namespace + bind mounts |
+| Network isolation | ✅ | network namespace, configurable sharing |
+| User isolation | ✅ | user namespace, UID mapping |
+| IPC isolation | ✅ | IPC namespace |
+| UTS isolation | ✅ | UTS namespace (hostname) |
+| cgroup isolation | ✅ | cgroup namespace |
+| Syscall restriction | ❌ | bwrap doesn't use seccomp, requires extra config |
+| Privilege escalation blocked | ✅ | user namespace prevents escalation |
+
+### Configuration Parameters
+
+```python
+BubblewrapCodeExecutionResource(
+    # === Filesystem Restrictions ===
+    bind_ro=["/usr/share/data"],      # Read-only bind mounts
+    bind_rw=["/var/work"],            # Read-write bind mounts
+    tmpfs=["/tmp", "/run"],           # tmpfs mount points
+    
+    # === Namespace Isolation ===
+    unshare_all=True,                 # Isolate all namespaces (recommended)
+    share_net=False,                  # Share host network (isolated by default)
+    
+    # === Process Control ===
+    clearenv=False,                   # Clear all environment variables
+    new_session=True,                 # Create new session (block SIGHUP propagation)
+    die_with_parent=True,             # Terminate sandbox when parent exits
+    
+    # === Advanced Options ===
+    extra_bwrap_args=["--size", "1G"], # Additional bwrap arguments
+)
+```
+
+### Default Read-only Bindings
+
+The following system directories are read-only bound to the sandbox by default (if they exist):
+- `/usr` — User programs
+- `/bin` — Basic commands
+- `/sbin` — System commands
+- `/lib`, `/lib64` — Shared libraries
+- `/etc/alternatives` — Alternative links
+
+### Capabilities Returned by `async_probe`
+
+```python
+{
+    "capabilities": {
+        "isolation": {
+            "process_contained": True,           # Processes are contained
+            "host_filesystem_restricted": True,  # Host filesystem is restricted
+            "privilege_escalation_blocked": True, # Privilege escalation blocked
+            "syscalls_restricted": False,        # Syscalls not restricted
+            "mechanism": "bubblewrap",
+            "network_mode": "configurable",      # Network is configurable
+        },
+        "workspace_access_modes": ["snapshot", "read_only", "read_write"],
+        "network": "configurable",
+        "safety_class": "isolated",
+    }
+}
+```
 
 ---
 
