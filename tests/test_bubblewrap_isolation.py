@@ -46,7 +46,15 @@ def check_bwrap_works() -> bool:
         return False
     try:
         result = subprocess.run(
-            ["bwrap", "--dev", "/dev", "--proc", "/proc", "--", "echo", "test"],
+            [
+                "bwrap",
+                "--ro-bind", "/usr", "/usr",
+                "--symlink", "usr/lib64", "/lib64",
+                "--proc", "/proc",
+                "--dev", "/dev",
+                "--tmpfs", "/tmp",
+                "--", "echo", "test",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -70,6 +78,9 @@ def run_bwrap(argv: list[str], *, extra_args: list[str] | None = None, timeout: 
         "bwrap",
         "--unshare-all",
         "--die-with-parent",
+        "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/lib64", "/lib64",
+        "--symlink", "usr/bin", "/bin",
         "--dev", "/dev",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
@@ -147,9 +158,9 @@ class TestFilesystemIsolation:
 
     def test_can_write_to_tmpfs(self):
         """Sandbox CAN write to tmpfs mounts."""
+        # Default run_bwrap already mounts tmpfs at /tmp
         result = run_bwrap(
             ["sh", "-c", "echo hello > /tmp/test && cat /tmp/test"],
-            extra_args=["--tmpfs", "/tmp"],
         )
         assert result["returncode"] == 0
         assert "hello" in result["stdout"]
