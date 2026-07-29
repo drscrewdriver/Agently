@@ -26,6 +26,36 @@ Workaround for AppArmor blocking bwrap (Ubuntu 23.10+):
 
     After applying any workaround, verify with:
         bwrap --dev /dev --proc /proc -- echo "bwrap works"
+
+---
+
+Bubblewrap 隔离验证测试。
+
+这些测试通过在 bwrap 内运行命令并检查受限操作是否被阻止，
+来验证实际的隔离效果。
+
+要求：
+- Linux 系统且已安装 bwrap
+- 启用用户命名空间（Debian/Ubuntu 上需设置 kernel.unprivileged_userns_clone=1）
+
+AppArmor 阻止 bwrap 的解决方案（Ubuntu 23.10+）：
+    AppArmor 限制非特权用户命名空间的创建。
+    选择以下任一方案：
+
+    方案 A - 禁用 bwrap 的 AppArmor 限制（开发环境推荐）：
+        sudo aa-disable /usr/bin/bwrap
+
+    方案 B - 系统级允许非特权用户命名空间：
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+    方案 C - 使用 setuid bwrap（安全性较低，仅限测试）：
+        sudo chmod u+s $(which bwrap)
+
+    方案 D - 以 root 权限运行测试：
+        sudo pytest tests/test_bubblewrap_isolation.py -v
+
+    应用上述方案后，使用以下命令验证：
+        bwrap --dev /dev --proc /proc -- echo "bwrap works"
 """
 
 from __future__ import annotations
@@ -65,10 +95,13 @@ def check_bwrap_works() -> bool:
 
 
 # Skip all tests if bwrap doesn't work (e.g., AppArmor blocks it)
+# 如果 bwrap 无法工作则跳过所有测试（例如 AppArmor 阻止）
 pytestmark = pytest.mark.skipif(
     not check_bwrap_works(),
-    reason="bwrap not working. Fix: sudo aa-disable /usr/bin/bwrap "
-           "OR sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+    reason=(
+        "bwrap not working. Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 | "
+        "bwrap 无法运行。修复：sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    ),
 )
 
 
