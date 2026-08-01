@@ -21,9 +21,10 @@ import textwrap
 from pathlib import Path
 
 # 确保 agently_stage_stub 可导入（无网络环境需要）
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_AGENTLY_ROOT = _PROJECT_ROOT / "Agently"
-_STUB_ROOT = _PROJECT_ROOT / "agently_stage_stub"
+# 脚本位于 Agently/scripts/ 下，项目根即为 Agently 仓库根
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_AGENTLY_ROOT = _PROJECT_ROOT  # Agently 仓库根
+_STUB_ROOT = _AGENTLY_ROOT.parent / "agently_stage_stub"  # stub 在仓库外
 for _p in [_AGENTLY_ROOT, _STUB_ROOT]:
     _s = str(_p)
     if _p.is_dir() and _s not in sys.path:
@@ -572,10 +573,10 @@ async def main() -> None:
     print(f"  环境: Docker={'就绪' if env.get('docker_version') else '未就绪'}  "
           f"runsc={'就绪' if env.get('runsc_available') else '未就绪'}")
     print(f"  分支代码: 54e15b7a — fix: override isolation capabilities when gVisor/runsc is selected")
-    print(f"\n  详细说明文档:")
-    print(f"    - {Path(__file__).resolve().parent.parent / 'docs' / 'gvisor-isolation-capabilities-override.md'}")
-    print(f"    - {Path(__file__).resolve().parent.parent / 'docs' / 'gvisor-test-scenarios-evidence.md'}")
-    print(f"    - {Path(__file__).resolve().parent.parent / 'docs' / 'pr335-intent-response.md'}")
+    print(f"  详细说明文档:")
+    print(f"    - {_PROJECT_ROOT / 'docs' / 'gvisor-isolation-capabilities-override.md'}")
+    print(f"    - {_PROJECT_ROOT / 'docs' / 'gvisor-test-scenarios-evidence.md'}")
+    print(f"    - {_PROJECT_ROOT / 'docs' / 'pr335-intent-response.md'}")
 
 
 if __name__ == "__main__":
