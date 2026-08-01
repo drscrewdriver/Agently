@@ -369,13 +369,111 @@ async def verify_code_logic(env: dict) -> None:
         warn("跳过 runsc 可用验证（环境无 runsc）")
 
     # ================================================================
-    # 2.5 async_probe 隔离能力覆盖验证（模拟）
+    # 2.5 隔离能力覆盖溯源证明（关键证据）
     # ================================================================
-    subheader("2.5 async_probe 隔离能力覆盖验证（模拟）")
+    subheader("2.5 隔离能力覆盖溯源证明（关键证据）")
 
+    # 证明逻辑：
+    #   _isolation_capabilities() 是静态方法，只能基于 default_args 做静态分析。
+    #   当 default_args 包含 --privileged 时，静态分析认为不安全。
+    #   但 gVisor 的 Sentry 内核在容器层之上额外拦截系统调用，--privileged 无效。
+    #   因此 async_probe() 在 runtime != "runc" 时强制覆盖三个字段。
+    #   关键代码位置：
+    #     DockerExecutionResourceProvider.py 第 1084-1087 行
+    #     (https://github.com/drscrewdriver/Agently/blob/adapt/gvisor-docker-runtime/...)
+
+    # 步骤 1: 调用 _isolation_capabilities() 获取静态 baseline
+    baseline_safe = DockerExecutionResourceProvider._isolation_capabilities(default_args=[])
+    baseline_unsafe = DockerExecutionResourceProvider._isolation_capabilities(
+        default_args=["--privileged"],
+    )
+
+    code_block("_isolation_capabilities(default_args=[]) 静态 baseline", baseline_safe)
+    code_block("_isolation_capabilities(default_args=['--privileged']) 静态 baseline", baseline_unsafe)
+
+    # 步骤 2: 用 monkeypatch 模拟 async_probe 对比
     import pytest
     monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "inspect_availability",
+        lambda self: {"available": True, "reason": "ready", "container_runtime": "runsc"},
+    )
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "inspect_image",
+        lambda self, image: {"image": image, "exists": True},
+    )
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "_profile",
+        lambda self, overrides=None: {
+            "language": "python",
+            "image": "python:3.12-slim",
+            "image_pull_policy": "never",
+            "network_mode": "disabled",
+        },
+    )
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "_default_image",
+        lambda self, language: "python:3.12-slim",
+    )
 
+    provider = DockerExecutionResourceProvider()
+    result_probe = await provider.async_probe(
+        requirement={
+            "config": {
+                "runtime": "runsc",
+                "default_args": ["--privileged"],
+            },
+            "kind": "code_execution",
+            "required_capabilities": {"language": "python"},
+        },
+        policy={},
+    )
+    iso_probe = result_probe["capabilities"]["isolation"]
+    monkeypatch.undo()
+
+    # 步骤 3: 对比证明
+    print()
+    ok(f"代码位置: DockerExecutionResourceProvider.py 第 1084-1087 行")
+    print()
+
+    # 对比项 1: mechanism
+    baseline_mech = baseline_unsafe.get("mechanism", "container")
+    probe_mech = iso_probe["mechanism"]
+    if baseline_mech == "container" and probe_mech == "gvisor_container":
+        ok(f"mechanism 覆盖: {baseline_mech!r} → {probe_mech!r}")
+    else:
+        fail(f"mechanism 未正确覆盖: baseline={baseline_mech!r}, probe={probe_mech!r}")
+
+    # 对比项 2: syscalls_restricted
+    baseline_sys = baseline_unsafe.get("syscalls_restricted", False)
+    probe_sys = iso_probe.get("syscalls_restricted", False)
+    if baseline_sys is False and probe_sys is True:
+        ok(f"syscalls_restricted 覆盖: {baseline_sys} → {probe_sys}  (gVisor 强制设为 True)")
+    else:
+        fail(f"syscalls_restricted 未正确覆盖: baseline={baseline_sys}, probe={probe_sys}")
+
+    # 对比项 3: container_runtime
+    if "container_runtime" not in baseline_unsafe and iso_probe.get("container_runtime") == "gvisor/runsc":
+        ok(f"container_runtime 新增: (baseline 无) → 'gvisor/runsc'")
+    else:
+        fail(f"container_runtime 未正确新增: baseline 无, probe={iso_probe.get('container_runtime', '(无)')}")
+
+    # 步骤 4: 完整对比输出
+    print()
+    code_block("静态 baseline (--privileged)", baseline_unsafe)
+    code_block("async_probe 结果 (runsc + --privileged)", iso_probe)
+    print("  ── 差异一目了然: probe 在 baseline 之上覆盖了三个字段 ──")
+
+    # ================================================================
+    # 2.6 async_probe 隔离能力覆盖验证（模拟）
+    # ================================================================
+    subheader("2.6 async_probe 隔离能力覆盖验证（模拟）")
+
+    monkeypatch = pytest.MonkeyPatch()
     # 模拟 runsc 可用 + 镜像存在
     monkeypatch.setattr(
         DockerExecutionResource,
@@ -467,9 +565,9 @@ async def verify_code_logic(env: dict) -> None:
     monkeypatch.undo()
 
     # ================================================================
-    # 2.6 ensure_available fail-closed 验证（模拟）
+    # 2.7 ensure_available fail-closed 验证（模拟）
     # ================================================================
-    subheader("2.6 ensure_available 异常抛出验证（模拟）")
+    subheader("2.7 ensure_available 异常抛出验证（模拟）")
 
     from agently.core import ExecutionResourceError
 
@@ -498,9 +596,9 @@ async def verify_code_logic(env: dict) -> None:
     monkeypatch.undo()
 
     # ================================================================
-    # 2.7 综合结果摘要
+    # 2.8 完整探针输出对比
     # ================================================================
-    subheader("2.7 完整探针输出对比")
+    subheader("2.8 完整探针输出对比")
     code_block("runc 模式 isolation", iso_runc)
     code_block("runsc 模式 isolation", iso)
     code_block("runsc + --privileged isolation", iso_unsafe)
