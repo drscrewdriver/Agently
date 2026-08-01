@@ -610,16 +610,17 @@ async def verify_code_logic(env: dict) -> None:
 
 
 async def verify_real_environment(env: dict) -> None:
-    """如果真实环境有 Docker + runsc，做一次真实探针。"""
-    if not env.get("docker_version") or not env["runsc_available"]:
-        header("Phase 3: 真实环境探针")
-        warn("跳过 Phase 3（需要 Docker + runsc 同时就绪）")
-        return
+    """真实环境探针 — 分三种场景：
 
+    1. Docker + runsc 都就绪 → 完整 runsc / runc 对比探针
+    2. Docker 就绪，runsc 未就绪 → 展示真实的 fail-closed 结果
+    3. Docker 未就绪 → 展示 Docker daemon 不可达的错误
+    """
     header("Phase 3: 真实环境探针")
 
     try:
         from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+            DockerExecutionResource,
             DockerExecutionResourceProvider,
         )
     except ImportError:
@@ -627,6 +628,19 @@ async def verify_real_environment(env: dict) -> None:
 
     provider = DockerExecutionResourceProvider()
 
+    if env.get("docker_version") and env["runsc_available"]:
+        # 场景 1: Docker + runsc 都可用 → 完整探针
+        await _real_probe_both(provider, env)
+    elif env.get("docker_version") and not env["runsc_available"]:
+        # 场景 2: Docker 可用，runsc 不可用 → 展示真实 fail-closed
+        await _real_probe_fail_closed(provider, env)
+    else:
+        # 场景 3: Docker 不可用 → 展示真实 inspect_availability 结果
+        await _real_probe_docker_unavailable(env)
+
+
+async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict) -> None:
+    """Docker + runsc 都可用时的完整探针。"""
     # 真实 runsc 探针
     subheader("3.1 真实 runsc 探针")
     result = await provider.async_probe(
@@ -657,8 +671,90 @@ async def verify_real_environment(env: dict) -> None:
     iso_runc = result_runc["capabilities"]["isolation"]
     ok(f"mechanism = {iso_runc['mechanism']}")
     ok(f"syscalls_restricted = {iso_runc['syscalls_restricted']}")
-    if "container_runtime" not in iso_runc:
-        ok("container_runtime 不存在（runc 模式下不报告）")
+    ok(f"container_runtime 不存在（runc 模式下不报告）")
+
+
+async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env: dict) -> None:
+    """Docker 可用但 runsc 不可用 → 展示真实的 fail-closed 行为。"""
+    subheader("3.1 真实 fail-closed 验证（runsc 缺失）")
+
+    # 直接用 DockerExecutionResource 调用 inspect_availability
+    resource = DockerExecutionResource(runtime="runsc")
+    result = resource.inspect_availability()
+
+    code_block("inspect_availability(runtime='runsc') 真实返回", result)
+
+    if not result["available"]:
+        ok(f"fail-closed 生效: available={result['available']}, reason={result['reason']!r}")
+    else:
+        fail(f"预期 fail-closed，但 available=True")
+
+    # 尝试 async_probe 看完整返回
+    probe_result = await provider.async_probe(
+        requirement={
+            "config": {"runtime": "runsc"},
+            "kind": "code_execution",
+            "required_capabilities": {"language": "python"},
+        },
+        policy={},
+    )
+    subheader("3.2 async_probe(runtime='runsc') 真实返回")
+    code_block("完整 probe 返回", probe_result)
+
+    if not probe_result["available"]:
+        ok(f"probe available=False, reason={probe_result['reason']!r}")
+        # 检查 meta 中是否有 availability 详情
+        meta_avail = probe_result.get("meta", {}).get("availability", {})
+        if meta_avail and not meta_avail.get("available"):
+            ok(f"meta.availability.reason = {meta_avail['reason']!r}")
+    else:
+        fail(f"预期 probe 返回 available=False，但得到 available=True")
+
+
+async def _real_probe_docker_unavailable(env: dict) -> None:
+    """Docker daemon 不可达时的真实诊断结果。"""
+    subheader("3.1 Docker daemon 状态诊断")
+
+    if env.get("docker_binary"):
+        ok(f"Docker 二进制存在: {env['docker_binary']}")
+    else:
+        fail("Docker 二进制不存在")
+
+    if env.get("docker_version"):
+        ok(f"Docker daemon 版本: {env['docker_version']}")
+    else:
+        # 从环境变量中获取更详细的错误信息
+        docker_bin = env.get("docker_binary")
+        if docker_bin:
+            # 尝试 docker version 获取详细错误
+            import subprocess
+            result = subprocess.run(
+                [docker_bin, "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            error_msg = result.stderr.strip() or result.stdout.strip()
+            code_block("docker version 错误输出", error_msg)
+
+            # 给出修复建议
+            print()
+            warn("Docker daemon 不可达，常见原因：")
+            warn("  1. 当前用户不在 docker 用户组 → sudo usermod -aG docker $USER")
+            warn("  2. Docker daemon 未运行 → sudo systemctl start docker")
+            warn("  3. Docker socket 权限问题 → sudo chmod 666 /var/run/docker.sock")
+            print()
+
+    # 即使 Docker 不可达，也可以展示 runsc 缺失
+    subheader("3.2 runsc 可用性")
+    if env.get("runsc_available"):
+        ok(f"runsc 可用: {env['runsc_version']}")
+    else:
+        # 尝试直接用哪种方式检测
+        import shutil
+        runsc_path = shutil.which("runsc")
+        if runsc_path:
+            warn(f"runsc 位于 {runsc_path}，但未注册到 Docker 运行时")
+        else:
+            fail("runsc 不在 PATH 中（需安装: sudo apt install runsc 或下载 gVisor 二进制）")
 
 
 # ======================================================================
