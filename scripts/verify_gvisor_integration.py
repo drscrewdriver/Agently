@@ -673,6 +673,25 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     ok(f"syscalls_restricted = {iso_runc['syscalls_restricted']}")
     ok(f"container_runtime 不存在（runc 模式下不报告）")
 
+    # ensure_available 对比（有 runsc 时不应抛出异常）
+    subheader("3.3 ensure_available() 行为对比")
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+    resource_runsc = DockerExecutionResource(runtime="runsc")
+    try:
+        resource_runsc.ensure_available()
+        ok("ensure_available(runtime='runsc') 正常通过（runsc 就绪）")
+    except Exception as exc:
+        warn(f"ensure_available(runtime='runsc') 抛出异常: {exc}")
+
+    resource_runc = DockerExecutionResource(runtime="runc")
+    try:
+        resource_runc.ensure_available()
+        ok("ensure_available(runtime='runc') 正常通过")
+    except Exception as exc:
+        warn(f"ensure_available(runtime='runc') 抛出异常: {exc}")
+
 
 async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env: dict) -> None:
     """Docker 可用但 runsc 不可用 → 展示真实的 fail-closed 行为。"""
@@ -713,6 +732,21 @@ async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env
             ok(f"meta.availability.reason = {meta_avail['reason']!r}")
     else:
         fail(f"预期 probe 返回 available=False，但得到 available=True")
+
+    # 尝试 ensure_available() 看异常信息
+    subheader("3.3 ensure_available() 异常信息")
+    try:
+        resource.ensure_available()
+        fail("ensure_available() 应抛出异常但未抛出")
+    except Exception as exc:
+        ok(f"ensure_available() 抛出异常类型: {type(exc).__name__}")
+        code_block("完整异常信息", exc)
+        # 提取关键信息
+        exc_str = str(exc)
+        if "runsc" in exc_str.lower():
+            ok(f"异常消息包含 'runsc': {exc_str[:120]}")
+        else:
+            warn(f"异常消息未明确提及 runsc: {exc_str[:120]}")
 
 
 async def _real_probe_docker_unavailable(env: dict) -> None:
