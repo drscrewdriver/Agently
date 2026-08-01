@@ -676,6 +676,10 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
 
 async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env: dict) -> None:
     """Docker 可用但 runsc 不可用 → 展示真实的 fail-closed 行为。"""
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+
     subheader("3.1 真实 fail-closed 验证（runsc 缺失）")
 
     # 直接用 DockerExecutionResource 调用 inspect_availability
