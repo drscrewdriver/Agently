@@ -35,26 +35,17 @@ for _p in [_AGENTLY_ROOT, _STUB_ROOT]:
 # 安装包路径：site-packages/agently/__init__.py
 _AGENTLY_INIT = _AGENTLY_ROOT / "agently" / "__init__.py"
 if _AGENTLY_INIT.is_file():
-    # 先尝试导入，检查来源
     try:
         import agently
         _imported_from = Path(agently.__file__).resolve()
         _expected_init = _AGENTLY_INIT.resolve()
         if _imported_from != _expected_init:
             print(f"  ⚠ agently 包来自 {_imported_from.parent}，非本地源码")
-            print(f"  → 建议执行: cd {_AGENTLY_ROOT} && pip install -e .")
-            print(f"  → 或者: PYTHONPATH={_AGENTLY_ROOT} python3 scripts/verify_gvisor_integration.py")
-            # 强制从本地源码重新加载
-            import importlib
-            importlib.invalidate_caches()
-            # 从 sys.modules 移除已加载的 agently 相关模块
-            _mods = [k for k in list(sys.modules) if k.startswith("agently")]
-            for _m in _mods:
-                del sys.modules[_m]
-            # 确保本地路径在 sys.path 最前面
-            sys.path.insert(0, str(_AGENTLY_ROOT))
+            print(f"  → 请执行: cd {_AGENTLY_ROOT} && pip install -e .")
+            print(f"  → 或: PYTHONPATH={_AGENTLY_ROOT} python3 scripts/verify_gvisor_integration.py")
+            print()
     except ImportError:
-        pass  # 可能还没安装，后面会处理
+        pass
 
 
 # ======================================================================
@@ -263,9 +254,9 @@ async def verify_code_logic(env: dict) -> None:
             ActionResourceRegistrar,
         )
         ok("成功导入本地分支代码")
-    except ImportError as e:
+    except (ImportError, KeyError) as e:
         fail(f"导入本地分支代码失败: {e}")
-        warn("请确保在 Agently 项目根目录下执行，且已安装 agently 包")
+        warn("请执行: cd Agently && pip install -e .  后再重试")
         return
 
     # ================================================================
