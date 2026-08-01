@@ -70,6 +70,11 @@ def _docker_env() -> dict[str, str]:
     return env
 
 
+def _docker_cmd(docker_bin: str, sub_args: list[str]) -> list[str]:
+    """添加 -H 强制使用本地 unix socket。"""
+    return [docker_bin, "-H", "unix:///var/run/docker.sock"] + sub_args
+
+
 def _docker_run(
     docker_bin: str,
     args: list[str],
@@ -517,6 +522,135 @@ if env.get("docker_version") and env["runsc_available"]:
         print()
 else:
     warn("跳过 Phase 5（需要 Docker + runsc 同时就绪）")
+
+
+# ══════════════════════════════════════════════════════════════
+#  Phase 6: 沙箱逃逸 + 用户态内核验证
+# ══════════════════════════════════════════════════════════════
+
+header("Phase 6: 沙箱逃逸 + 用户态内核验证")
+
+ESCAPE_IMAGE = "alpine:latest"
+
+if env.get("docker_version") and env["runsc_available"]:
+    ok("核心验证：gVisor Sentry 用户态内核应阻止任何逃逸尝试，")
+    ok("且容器内看到的是虚拟内核而非宿主内核。")
+    print()
+
+    escape_tests = [
+        # （标签， bash 命令， 预期失败关键词）
+        ("宿主文件系统访问",
+         "ls /proc/1/root/etc/passwd 2>&1 || true",
+         "No such file"),
+        ("宿主机 PID 可见性",
+         "ls /proc/1/root/ 2>&1 || echo blocked",
+         "blocked"),
+        ("挂载宿主磁盘",
+         "mount /dev/sda /mnt 2>&1 || true",
+         "Operation not permitted"),
+        ("挂载宿主 NVMe",
+         "mount /dev/nvme0n1 /mnt 2>&1 || true",
+         "No such file"),
+        ("读取宿主设备",
+         "cat /dev/sda 2>&1 && echo success || echo 'Operation not permitted'",
+         "Operation not permitted"),
+        ("nsenter 逃逸",
+         "nsenter -t 1 -m -u -i -n -p true 2>&1 || true",
+         "Operation not permitted"),
+        ("创建新 PID 命名空间",
+         "unshare -p -f true 2>&1 || true",
+         "Operation not permitted"),
+        ("ptrace 宿主进程",
+         "strace -p 1 2>&1 || true",
+         "Operation not permitted"),
+        ("写入内核参数",
+         "sysctl -w kernel.tainted=1 2>&1 || true",
+         "sysctl: permission"),
+        ("写入 sysfs",
+         "echo 1 > /sys/kernel/panic 2>&1 && echo ok || echo 'Read-only'",
+         "Read-only"),
+        ("内核模块加载",
+         "modprobe dummy 2>&1 || true",
+         "Operation not permitted"),
+        ("重启宿主机",
+         "reboot 2>&1 || true",
+         "Operation not permitted"),
+    ]
+
+    for label, bash_cmd, expect_block in escape_tests:
+        r_runsc = run_cmd("runsc", ESCAPE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
+        r_runc_priv = subprocess.run(
+            _docker_cmd(shutil.which("docker") or "docker",
+                        ["run", "--rm", "--privileged", ESCAPE_IMAGE, "sh", "-c", bash_cmd]),
+            capture_output=True, text=False, timeout=10, env=_docker_env(),
+        )
+
+        def _trim_bin(out: bytes) -> str:
+            s = _decode(out).strip()[:60]
+            return s if s else "(ok)"
+
+        runsc_result = _trim_bin(r_runsc.stderr or r_runsc.stdout)
+        runc_result = _trim_bin(r_runc_priv.stderr or r_runc_priv.stdout)
+
+        blocked = expect_block.lower() in runsc_result.lower() or "blocked" in runsc_result.lower() or "permission" in runsc_result.lower() or "denied" in runsc_result.lower()
+
+        print(f"  [{label}] {bash_cmd[:50]}")
+        print(f"    runc+priv:  {runc_result}")
+        print(f"    runsc:      {runsc_result}")
+        if blocked:
+            ok(f"  → 逃逸/访问被拦截: {label}")
+        else:
+            warn(f"  → 可能可逃逸或未拦截: {label}")
+        print()
+
+    # ── 用户态内核证据 ──
+    subheader("6.1 用户态内核证据")
+    print()
+
+    kernel_probes = [
+        ("uname -r",
+         "uname -r",
+         "4.19.0-gvisor"),
+        ("cat /proc/version",
+         "cat /proc/version",
+         "gVisor"),
+        ("cat /proc/sys/kernel/ostype",
+         "cat /proc/sys/kernel/ostype",
+         "Linux"),
+        ("cat /proc/1/cmdline",
+         "cat /proc/1/cmdline | tr '\\0' ' '",
+         "runsc"),
+        ("ls /proc/modules",
+         "cat /proc/modules 2>&1 || echo '(empty)'",
+         "empty"),
+        ("ls /proc/kallsyms",
+         "cat /proc/kallsyms 2>&1 | head -1 || echo '(empty)'",
+         "empty"),
+        ("dmesg",
+         "dmesg 2>&1 || true",
+         "Operation not permitted"),
+    ]
+
+    for label, bash_cmd, expect in kernel_probes:
+        r_runsc = run_cmd("runsc", ESCAPE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
+        r_runc = run_cmd("runc", ESCAPE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
+
+        runsc_result = _trim_bin(r_runsc.stdout or r_runsc.stderr)
+        runc_result = _trim_bin(r_runc.stdout or r_runc.stderr)
+
+        print(f"  [{label}]")
+        print(f"    runc:   {runc_result}")
+        print(f"    runsc:  {runsc_result}")
+        if expect.lower() in runsc_result.lower():
+            ok(f"  → 符合预期: {label} 显示用户态虚拟内核")
+        elif "permission" in runsc_result.lower() or "denied" in runsc_result.lower() or "empty" in runsc_result.lower():
+            ok(f"  → 符合预期: {label} 被 Sentry 拦截（用户态内核无对应资源）")
+        else:
+            warn(f"  → 异常: {label} 值 {runsc_result} 与预期不符")
+        print()
+
+else:
+    warn("跳过 Phase 6（需要 Docker + runsc 同时就绪）")
 
 
 # ══════════════════════════════════════════════════════════════
