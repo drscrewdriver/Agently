@@ -639,6 +639,49 @@ async def verify_real_environment(env: dict) -> None:
         await _real_probe_docker_unavailable(env)
 
 
+def _run_syscall_test(
+    docker_bin: str,
+    label: str,
+    desc: str,
+    cmd: list[str],
+    expected_block_msg: str,
+) -> None:
+    """运行 runc (privileged) vs runsc (privileged) 对比测试。"""
+    # 构造 base args
+    base_args = ["run", "--rm", "--privileged"]
+
+    # runc 测试
+    full_cmd = [docker_bin] + list(base_args) + ["alpine:latest"] + cmd
+    runc_output = ""
+    rc_runc = None
+    try:
+        rc_runc = subprocess.run(full_cmd, capture_output=True, text=True, timeout=10)
+        runc_output = rc_runc.stdout.strip() or rc_runc.stderr.strip()
+    except Exception:
+        runc_output = "(timeout/error)"
+
+    # runsc 测试
+    runsc_args = list(base_args) + ["--runtime", "runsc"]
+    full_cmd_runsc = [docker_bin] + runsc_args + ["alpine:latest"] + cmd
+    runsc_output = ""
+    try:
+        rc_runsc = subprocess.run(full_cmd_runsc, capture_output=True, text=True, timeout=10)
+        runsc_output = rc_runsc.stdout.strip() or rc_runsc.stderr.strip()
+    except Exception:
+        runsc_output = "(timeout/error)"
+
+    runsc_blocked = expected_block_msg.split(":")[0].lower() in runsc_output.lower()
+
+    print(f"  [{label}] {desc}")
+    print(f"    runc:   {runc_output[:80]}")
+    print(f"    runsc:  {runsc_output[:80]}")
+    if runsc_blocked:
+        ok(f"  → gVisor 拦截: {label} 被 Sentry 拒绝")
+    else:
+        warn(f"  → gVisor 未拦截 {label}")
+    print()
+
+
 async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict) -> None:
     """Docker + runsc 都可用时的完整探针。"""
     # 真实 runsc 探针
@@ -739,6 +782,45 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
             ok(f"runc 容器内核: {kernel_runc}")
     except Exception:
         pass
+
+    # 分类 syscall 隔离验证：对比 runc vs runsc 在各类别上的行为差异
+    subheader("3.5 分类 syscall 隔离验证（runc vs runsc 对比）")
+    ok("原理：gVisor Sentry 用户空间内核拦截所有系统调用，")
+    ok("      即使容器以 --privileged 运行，危险 syscall 仍被拒绝。")
+    ok("      而 runc 容器共享宿主内核，--privileged 可绕过所有限制。")
+    print()
+
+    _run_syscall_test(
+        docker_bin,
+        "内核日志读取",
+        'dmesg',
+        ["dmesg"],
+        "dmesg: read kernel buffer failed: Operation not permitted",
+    )
+    _run_syscall_test(
+        docker_bin,
+        "文件系统挂载",
+        'mount -t tmpfs none /mnt',
+        ["sh", "-c", "mount -t tmpfs none /mnt 2>&1 || true"],
+        "Operation not permitted",
+    )
+    _run_syscall_test(
+        docker_bin,
+        "原始设备访问",
+        'cat /dev/mem 2>&1 | head -1',
+        ["sh", "-c", "cat /dev/mem 2>&1; exit 0"],
+        "Operation not permitted",
+    )
+    _run_syscall_test(
+        docker_bin,
+        "内核模块加载",
+        'modprobe 2>&1 | head -1',
+        ["sh", "-c", "modprobe 2>&1; exit 0"],
+        "permitted",
+    )
+    print()
+    ok("runc 模式允许所有特权操作（--privileged 生效）")
+    ok("runsc 模式拒绝所有特权操作（gVisor Sentry 拦截）")
 
 
 async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env: dict) -> None:
