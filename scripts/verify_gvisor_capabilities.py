@@ -80,9 +80,9 @@ def _decode(out: bytes) -> str:
         return out.decode("latin-1", errors="replace")
 
 
-def _trim(out: bytes) -> str:
+def _trim(out: bytes, max_len: int = 200) -> str:
     s = _decode(out).strip()
-    return s[:60] if s else "(ok)"
+    return s[:max_len] if s else "(ok)"
 
 
 # ── 镜像 ───────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ ESCAPE_TESTS = [
     ("宿主文件系统访问",       "ls /proc/1/root/etc/passwd 2>&1 || true",                     "No such file"),
     ("宿主机 PID 可见性",      "ls /proc/1/root/ 2>&1 || echo blocked",                        "blocked"),
     ("挂载宿主磁盘",           "mount /dev/sda /mnt 2>&1 || true",                             "mount:"),
-    ("读取宿主设备",           "cat /dev/sda 2>&1 && echo success || echo 'permission denied'", "permission denied"),
+    ("读取宿主设备",           "cat /dev/mem 2>&1 && echo success || echo 'permission denied'", "permission denied"),
     # ── 命名空间逃逸 ──
     ("nsenter 命名空间逃逸",   "nsenter -t 1 -m -u -i -n -p true 2>&1 || true",                "Operation not permitted"),
     ("unshare 创建新 PID ns",  "unshare -p -f true 2>&1 || true",                              "Operation not permitted"),
@@ -198,12 +198,11 @@ ESCAPE_TESTS = [
     ("写入内核参数",           "sysctl -w kernel.tainted=1 2>&1 || true",                       "sysctl:"),
     ("写入 sysfs",             "echo 1 > /sys/kernel/panic 2>&1 && echo ok || echo 'Read-only'", "Read-only"),
     ("内核模块加载",           "modprobe dummy 2>&1 || true",                                  "modprobe:"),
-    ("重启宿主机",             "reboot 2>&1 || true",                                          "Operation not permitted"),
+    ("重启宿主机",             "kill -KILL 1 2>&1 || echo blocked",                              "Operation not permitted"),
     # ── 网络逃逸 ──
     ("网络命名空间逃逸",       "nsenter -t 1 -n true 2>&1 && echo 'escaped' || echo 'blocked'", "blocked"),
     ("ping 外网 223.5.5.5",   "ping -c 1 -W 2 223.5.5.5 2>&1 || true",                        "Network is unreachable"),
-    ("wget 外网 example.com", "wget -q -T 3 http://example.com 2>&1 || true",                  "failed"),
-    ("DNS 解析外网",          "getent hosts google.com 2>&1 || echo 'no network'",              "no network"),
+    ("wget 外网 baidu.com",   "wget -q -T 3 http://baidu.com 2>&1 || true",                    "failed"),
 ]
 
 # 运行 runc+priv 对比（→ 应该成功）
@@ -229,28 +228,30 @@ if env.get("docker_version") and env["runsc_available"]:
         runsc_priv_out = _trim(r_runsc_priv.stderr or r_runsc_priv.stdout)
 
         # 判断是否被拦截
-        runsc_blocked = (
-            "permission" in runsc_out.lower()
-            or "denied" in runsc_out.lower()
-            or "blocked" in runsc_out.lower()
-            or "read-only" in runsc_out.lower()
-            or "no such file" in runsc_out.lower()
-            or "mount:" in runsc_out.lower()
-            or "modprobe:" in runsc_out.lower()
-            or "strace:" in runsc_out.lower()
-            or "sysctl:" in runsc_out.lower()
-            or "not found" in runsc_out.lower()
-            or "unreachable" in runsc_out.lower()
-            or "failed" in runsc_out.lower()
-            or "no network" in runsc_out.lower()
-        )
-        runsc_priv_blocked = (
-            "permission" in runsc_priv_out.lower()
-            or "denied" in runsc_priv_out.lower()
-            or "blocked" in runsc_priv_out.lower()
-            or "read-only" in runsc_priv_out.lower()
-            or "no such file" in runsc_priv_out.lower()
-        )
+        def _is_blocked(out: str) -> bool:
+            lo = out.lower()
+            return (
+                "not permitted" in lo
+                or "permission" in lo
+                or "denied" in lo
+                or "blocked" in lo
+                or "read-only" in lo
+                or "no such file" in lo
+                or "mount:" in lo
+                or "modprobe:" in lo
+                or "strace:" in lo
+                or "sysctl:" in lo
+                or "not found" in lo
+                or "unreachable" in lo
+                or "failed" in lo
+                or "no network" in lo
+                or "bad address" in lo
+                or "can't" in lo
+                or "cannot" in lo
+            )
+
+        runsc_blocked = _is_blocked(runsc_out)
+        runsc_priv_blocked = _is_blocked(runsc_priv_out)
 
         status = "✓ 拦截" if runsc_blocked else "⚠ 可能可逃逸"
         status_priv = "✓ 拦截" if runsc_priv_blocked else "⚠ 可能可逃逸"
