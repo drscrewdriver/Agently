@@ -184,17 +184,26 @@ header("Phase 2: 沙箱逃逸阻断验证")
 
 # 每个逃逸向量: (标签, bash 命令, 预期被拦截关键词)
 ESCAPE_TESTS = [
+    # ── 文件系统逃逸 ──
     ("宿主文件系统访问",       "ls /proc/1/root/etc/passwd 2>&1 || true",                     "No such file"),
     ("宿主机 PID 可见性",      "ls /proc/1/root/ 2>&1 || echo blocked",                        "blocked"),
     ("挂载宿主磁盘",           "mount /dev/sda /mnt 2>&1 || true",                             "mount:"),
     ("读取宿主设备",           "cat /dev/sda 2>&1 && echo success || echo 'permission denied'", "permission denied"),
+    # ── 命名空间逃逸 ──
     ("nsenter 命名空间逃逸",   "nsenter -t 1 -m -u -i -n -p true 2>&1 || true",                "Operation not permitted"),
     ("unshare 创建新 PID ns",  "unshare -p -f true 2>&1 || true",                              "Operation not permitted"),
+    # ── 进程操作逃逸 ──
     ("ptrace 宿主进程",        "strace -p 1 2>&1 || true",                                     "strace:"),
+    # ── 内核参数篡改 ──
     ("写入内核参数",           "sysctl -w kernel.tainted=1 2>&1 || true",                       "sysctl:"),
     ("写入 sysfs",             "echo 1 > /sys/kernel/panic 2>&1 && echo ok || echo 'Read-only'", "Read-only"),
     ("内核模块加载",           "modprobe dummy 2>&1 || true",                                  "modprobe:"),
     ("重启宿主机",             "reboot 2>&1 || true",                                          "Operation not permitted"),
+    # ── 网络逃逸 ──
+    ("网络命名空间逃逸",       "nsenter -t 1 -n true 2>&1 && echo 'escaped' || echo 'blocked'", "blocked"),
+    ("ping 外网 223.5.5.5",   "ping -c 1 -W 2 223.5.5.5 2>&1 || true",                        "Network is unreachable"),
+    ("wget 外网 example.com", "wget -q -T 3 http://example.com 2>&1 || true",                  "failed"),
+    ("DNS 解析外网",          "getent hosts google.com 2>&1 || echo 'no network'",              "no network"),
 ]
 
 # 运行 runc+priv 对比（→ 应该成功）
@@ -231,6 +240,9 @@ if env.get("docker_version") and env["runsc_available"]:
             or "strace:" in runsc_out.lower()
             or "sysctl:" in runsc_out.lower()
             or "not found" in runsc_out.lower()
+            or "unreachable" in runsc_out.lower()
+            or "failed" in runsc_out.lower()
+            or "no network" in runsc_out.lower()
         )
         runsc_priv_blocked = (
             "permission" in runsc_priv_out.lower()
