@@ -14,11 +14,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+# ── Docker socket 环境修复 ─────────────────────────────────────
+def _docker_env() -> dict[str, str]:
+    """返回不含 DOCKER_HOST 的干净环境。"""
+    env = dict(os.environ)
+    env.pop("DOCKER_HOST", None)
+    return env
+
+
+def _docker_cmd(docker_bin: str, sub_args: list[str]) -> list[str]:
+    """添加 -H 强制使用本地 unix socket。"""
+    return [docker_bin, "-H", "unix:///var/run/docker.sock"] + sub_args
 
 # 确保 agently_stage_stub 可导入（无网络环境需要）
 # 脚本位于 Agently/scripts/ 下，项目根即为 Agently 仓库根
@@ -114,13 +127,20 @@ def check_environment() -> dict:
         fail("docker 不在 PATH 中")
         env["docker_binary"] = None
 
+    # DOCKER_HOST 环境检查
+    _dh = os.environ.get("DOCKER_HOST", "")
+    if _dh and "tcp://" in _dh:
+        warn(f"DOCKER_HOST={_dh} 可能导致连接失败，脚本将强制使用 -H unix socket")
+    else:
+        ok("DOCKER_HOST 未设置或指向本地 socket")
+
     # 1.2 Docker daemon 状态
     subheader("1.2 Docker daemon 状态")
     if docker_bin:
         try:
             result = subprocess.run(
-                [docker_bin, "version", "--format", "{{.Server.Version}}"],
-                capture_output=True, text=True, timeout=10,
+                _docker_cmd(docker_bin, ["version", "--format", "{{.Server.Version}}"]),
+                capture_output=True, text=True, timeout=10, env=_docker_env(),
             )
             if result.returncode == 0:
                 ok(f"Docker daemon 运行中，版本: {result.stdout.strip()}")
@@ -171,8 +191,8 @@ def check_environment() -> dict:
     if docker_bin and env.get("docker_version"):
         try:
             result = subprocess.run(
-                [docker_bin, "info", "--format", "{{json .Runtimes}}"],
-                capture_output=True, text=True, timeout=10,
+                _docker_cmd(docker_bin, ["info", "--format", "{{json .Runtimes}}"]),
+                capture_output=True, text=True, timeout=10, env=_docker_env(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 runtimes = json.loads(result.stdout.strip())
@@ -204,9 +224,9 @@ def check_environment() -> dict:
         # runc 容器内内核
         try:
             result = subprocess.run(
-                [docker_bin, "run", "--rm", "alpine", "uname", "-r"],
-                capture_output=True, text=True, timeout=15,
-            )
+            _docker_cmd(docker_bin, ["run", "--rm", "alpine", "uname", "-r"]),
+            capture_output=True, text=True, timeout=15, env=_docker_env(),
+        )
             if result.returncode == 0:
                 ok(f"runc 容器内核: {result.stdout.strip()} (与宿主一致)")
             else:
@@ -218,10 +238,9 @@ def check_environment() -> dict:
         if env["runsc_available"] and "runsc" in env.get("docker_runtimes", []):
             try:
                 result = subprocess.run(
-                    [docker_bin, "run", "--rm", "--runtime", "runsc",
-                     "alpine", "uname", "-r"],
-                    capture_output=True, text=True, timeout=15,
-                )
+                _docker_cmd(docker_bin, ["run", "--rm", "--runtime", "runsc", "alpine", "uname", "-r"]),
+                capture_output=True, text=True, timeout=15, env=_docker_env(),
+            )
                 if result.returncode == 0:
                     ok(f"runsc 容器内核: {result.stdout.strip()} "
                        f"({Colors.BOLD}与宿主不同! gVisor Sentry 虚拟内核{Colors.RESET})")
@@ -647,25 +666,21 @@ def _run_syscall_test(
     expected_block_msg: str,
 ) -> None:
     """运行 runc (privileged) vs runsc (privileged) 对比测试。"""
-    # 构造 base args
-    base_args = ["run", "--rm", "--privileged"]
-
-    # runc 测试
-    full_cmd = [docker_bin] + list(base_args) + ["alpine:latest"] + cmd
+    # runc 测试（--privileged）
+    full_cmd = _docker_cmd(docker_bin, ["run", "--rm", "--privileged", "alpine:latest"] + cmd)
     runc_output = ""
     rc_runc = None
     try:
-        rc_runc = subprocess.run(full_cmd, capture_output=True, text=True, timeout=10)
+        rc_runc = subprocess.run(full_cmd, capture_output=True, text=True, timeout=10, env=_docker_env())
         runc_output = rc_runc.stdout.strip() or rc_runc.stderr.strip()
     except Exception:
         runc_output = "(timeout/error)"
 
-    # runsc 测试
-    runsc_args = list(base_args) + ["--runtime", "runsc"]
-    full_cmd_runsc = [docker_bin] + runsc_args + ["alpine:latest"] + cmd
+    # runsc 测试（--privileged + --runtime runsc）
+    full_cmd_runsc = _docker_cmd(docker_bin, ["run", "--rm", "--privileged", "--runtime", "runsc", "alpine:latest"] + cmd)
     runsc_output = ""
     try:
-        rc_runsc = subprocess.run(full_cmd_runsc, capture_output=True, text=True, timeout=10)
+        rc_runsc = subprocess.run(full_cmd_runsc, capture_output=True, text=True, timeout=10, env=_docker_env())
         runsc_output = rc_runsc.stdout.strip() or rc_runsc.stderr.strip()
     except Exception:
         runsc_output = "(timeout/error)"
@@ -745,14 +760,14 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     docker_bin = shutil.which("docker") or "docker"
 
     # 构建完整的 docker run 命令
-    full_cmd = [docker_bin, "run", "--rm"] + list(base_args) + ["alpine:latest", "uname", "-r"]
+    full_cmd = _docker_cmd(docker_bin, ["run", "--rm"] + list(base_args) + ["alpine:latest", "uname", "-r"])
     ok(f"Docker 命令: {' '.join(full_cmd)}")
     print()
 
     # 执行并捕获输出
     try:
         exec_result = subprocess.run(
-            full_cmd, capture_output=True, text=True, timeout=30,
+            full_cmd, capture_output=True, text=True, timeout=30, env=_docker_env(),
         )
         if exec_result.returncode == 0:
             kernel = exec_result.stdout.strip()
@@ -772,10 +787,10 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     # 对比：runc 模式下内核不同
     resource_runc = DockerExecutionResource(runtime="runc")
     base_args_runc = resource_runc._container_base_args(profile=profile)
-    full_cmd_runc = [docker_bin, "run", "--rm"] + list(base_args_runc) + ["alpine:latest", "uname", "-r"]
+    full_cmd_runc = _docker_cmd(docker_bin, ["run", "--rm"] + list(base_args_runc) + ["alpine:latest", "uname", "-r"])
     try:
         exec_result_runc = subprocess.run(
-            full_cmd_runc, capture_output=True, text=True, timeout=30,
+            full_cmd_runc, capture_output=True, text=True, timeout=30, env=_docker_env(),
         )
         if exec_result_runc.returncode == 0:
             kernel_runc = exec_result_runc.stdout.strip()
@@ -897,8 +912,8 @@ async def _real_probe_docker_unavailable(env: dict) -> None:
             # 尝试 docker version 获取详细错误
             import subprocess
             result = subprocess.run(
-                [docker_bin, "version"],
-                capture_output=True, text=True, timeout=10,
+                _docker_cmd(docker_bin, ["version"]),
+                capture_output=True, text=True, timeout=10, env=_docker_env(),
             )
             error_msg = result.stderr.strip() or result.stdout.strip()
             code_block("docker version 错误输出", error_msg)

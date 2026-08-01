@@ -64,10 +64,9 @@ def header(title: str) -> None:
 
 
 def _docker_env() -> dict[str, str]:
-    """返回不含 DOCKER_HOST 的干净环境，规避 tcp://docker:2375 等错误配置。"""
+    """返回不含 DOCKER_HOST 的干净环境。"""
     env = dict(os.environ)
     env.pop("DOCKER_HOST", None)
-    env["DOCKER_HOST"] = "unix:///var/run/docker.sock"
     return env
 
 
@@ -79,8 +78,8 @@ def _docker_run(
     timeout: int = 15,
     privileged: bool = False,
 ) -> subprocess.CompletedProcess:
-    """执行 docker run 命令，自动处理 DOCKER_HOST 环境问题。"""
-    cmd = [docker_bin, "run", "--rm"]
+    """执行 docker run 命令，用 -H 参数强制指定本地 socket。"""
+    cmd = [docker_bin, "-H", "unix:///var/run/docker.sock", "run", "--rm"]
     if privileged:
         cmd.append("--privileged")
     cmd.extend(args)
@@ -143,7 +142,7 @@ docker_bin = shutil.which("docker") or ""
 env["docker_binary"] = docker_bin
 if docker_bin:
     ok(f"docker 位于 {docker_bin}")
-    r = subprocess.run([docker_bin, "version", "--format", "{{.Server.Version}}"],
+    r = subprocess.run([docker_bin, "-H", "unix:///var/run/docker.sock", "version", "--format", "{{.Server.Version}}"],
                        capture_output=True, text=True, timeout=5, env=_docker_env())
     env["docker_version"] = r.stdout.strip() if r.returncode == 0 else ""
     if env["docker_version"]:
@@ -178,7 +177,7 @@ except Exception:
 
 # 1.4 检查 Docker 是否注册了 runsc 运行时
 if docker_bin and env.get("docker_version"):
-    r = subprocess.run([docker_bin, "info", "--format", "{{json .Runtimes}}"],
+    r = subprocess.run([docker_bin, "-H", "unix:///var/run/docker.sock", "info", "--format", "{{json .Runtimes}}"],
                        capture_output=True, text=True, timeout=5, env=_docker_env())
     if r.returncode == 0:
         env["registered_runtimes"] = list(json.loads(r.stdout).keys())
