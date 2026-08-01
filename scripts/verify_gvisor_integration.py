@@ -757,10 +757,13 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     resource_runsc = DockerExecutionResource(runtime="runsc")
     profile = {"image": "alpine:latest", "network_mode": "disabled"}
     base_args = resource_runsc._container_base_args(profile=profile)
+    # _container_base_args → [docker_bin, "run", "--rm", ...container_args]
+    # 提取容器运行时参数，跳过 docker_bin / "run" / "--rm"
+    container_args = list(base_args)[3:]
     docker_bin = shutil.which("docker") or "docker"
 
     # 构建完整的 docker run 命令
-    full_cmd = _docker_cmd(docker_bin, ["run", "--rm"] + list(base_args) + ["alpine:latest", "uname", "-r"])
+    full_cmd = _docker_cmd(docker_bin, ["run", "--rm"] + container_args + ["alpine:latest", "uname", "-r"])
     ok(f"Docker 命令: {' '.join(full_cmd)}")
     print()
 
@@ -787,7 +790,8 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     # 对比：runc 模式下内核不同
     resource_runc = DockerExecutionResource(runtime="runc")
     base_args_runc = resource_runc._container_base_args(profile=profile)
-    full_cmd_runc = _docker_cmd(docker_bin, ["run", "--rm"] + list(base_args_runc) + ["alpine:latest", "uname", "-r"])
+    container_args_runc = list(base_args_runc)[3:]
+    full_cmd_runc = _docker_cmd(docker_bin, ["run", "--rm"] + container_args_runc + ["alpine:latest", "uname", "-r"])
     try:
         exec_result_runc = subprocess.run(
             full_cmd_runc, capture_output=True, text=True, timeout=30, env=_docker_env(),
