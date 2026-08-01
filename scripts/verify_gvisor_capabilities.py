@@ -205,17 +205,21 @@ ESCAPE_TESTS = [
     ("wget 外网 baidu.com",   "wget -q -T 3 http://baidu.com 2>&1 || true",                    "failed"),
 ]
 
-# 运行 runc+priv 对比（→ 应该成功）
+# 运行 runc 普通模式（标准 Docker 容器行为）
+# 运行 runc+priv 对比（→ 可访问宿主资源）
 # 运行 runsc 普通模式（→ 应该被拦截）
 # 运行 runsc+priv 模式（→ 也应该被拦截，证明 gVisor 覆盖 --privileged）
 
 if env.get("docker_version") and env["runsc_available"]:
-    ok("对比: runc+priv = 可访问宿主资源, runsc = 被拦截")
+    ok("对比: runc = 标准 Docker, runc+priv = 宿主全开, runsc = gVisor 隔离")
     print()
 
     for label, bash_cmd, expect_block in ESCAPE_TESTS:
-        # runc + --privileged（对比基准）
-        r_runc = _docker(["run", "--rm", "--privileged", ALPINE, "sh", "-c", bash_cmd], timeout=10)
+        # runc 普通模式（标准 Docker 容器，无特权）
+        r_runc = _docker(["run", "--rm", ALPINE, "sh", "-c", bash_cmd], timeout=10)
+
+        # runc + --privileged（对比基准：宿主全开）
+        r_runc_priv = _docker(["run", "--rm", "--privileged", ALPINE, "sh", "-c", bash_cmd], timeout=10)
 
         # runsc 普通模式
         r_runsc = _docker(["run", "--rm"] + RUNSC_ARGS + [ALPINE, "sh", "-c", bash_cmd], timeout=10)
@@ -224,6 +228,7 @@ if env.get("docker_version") and env["runsc_available"]:
         r_runsc_priv = _docker(["run", "--rm", "--privileged"] + RUNSC_ARGS + [ALPINE, "sh", "-c", bash_cmd], timeout=10)
 
         runc_out = _trim(r_runc.stderr or r_runc.stdout)
+        runc_priv_out = _trim(r_runc_priv.stderr or r_runc_priv.stdout)
         runsc_out = _trim(r_runsc.stderr or r_runsc.stdout)
         runsc_priv_out = _trim(r_runsc_priv.stderr or r_runsc_priv.stdout)
 
@@ -250,16 +255,21 @@ if env.get("docker_version") and env["runsc_available"]:
                 or "cannot" in lo
             )
 
+        runc_blocked = _is_blocked(runc_out)
+        runc_priv_blocked = _is_blocked(runc_priv_out)
         runsc_blocked = _is_blocked(runsc_out)
         runsc_priv_blocked = _is_blocked(runsc_priv_out)
 
-        status = "✓ 拦截" if runsc_blocked else "⚠ 可能可逃逸"
-        status_priv = "✓ 拦截" if runsc_priv_blocked else "⚠ 可能可逃逸"
+        status_runc = "✓ 自身拦截" if runc_blocked else "⚠ 可访问"
+        status_runc_priv = "✓ 自身拦截" if runc_priv_blocked else "⚠ 可访问"
+        status_runsc = "✓ 拦截" if runsc_blocked else "⚠ 可能可逃逸"
+        status_runsc_priv = "✓ 拦截" if runsc_priv_blocked else "⚠ 可能可逃逸"
 
         print(f"  [{label}]")
-        print(f"    runc+priv:  {runc_out}")
-        print(f"    runsc:      {runsc_out}  {status}")
-        print(f"    runsc+priv: {runsc_priv_out}  {status_priv}")
+        print(f"    runc:        {runc_out}  {status_runc}")
+        print(f"    runc+priv:   {runc_priv_out}  {status_runc_priv}")
+        print(f"    runsc:       {runsc_out}  {status_runsc}")
+        print(f"    runsc+priv:  {runsc_priv_out}  {status_runsc_priv}")
         print()
 
 else:
@@ -283,14 +293,19 @@ KERNEL_PROBES = [
 ]
 
 if env.get("docker_version") and env["runsc_available"]:
-    ok("对比: runc → 宿主内核, runsc → gVisor 虚拟内核")
+    ok("对比: runc = 标准 Docker, runc+RUNC_ARGS = 框架限制, runsc = gVisor 虚拟内核")
     print()
 
     for label, bash_cmd, expect in KERNEL_PROBES:
-        r_runc = _docker(["run", "--rm"] + RUNC_ARGS + [ALPINE, "sh", "-c", bash_cmd], timeout=10)
+        # runc 普通模式（标准 Docker，无额外限制）
+        r_runc = _docker(["run", "--rm", ALPINE, "sh", "-c", bash_cmd], timeout=10)
+        # runc + 框架限制参数
+        r_runc_restricted = _docker(["run", "--rm"] + RUNC_ARGS + [ALPINE, "sh", "-c", bash_cmd], timeout=10)
+        # runsc
         r_runsc = _docker(["run", "--rm"] + RUNSC_ARGS + [ALPINE, "sh", "-c", bash_cmd], timeout=10)
 
         runc_out = _trim(r_runc.stdout or r_runc.stderr)
+        runc_restricted_out = _trim(r_runc_restricted.stdout or r_runc_restricted.stderr)
         runsc_out = _trim(r_runsc.stdout or r_runsc.stderr)
 
         # 判断是否符合预期
@@ -304,8 +319,9 @@ if env.get("docker_version") and env["runsc_available"]:
             status = f"⚠ 值={runsc_out}"
 
         print(f"  [{label}]")
-        print(f"    runc:   {runc_out}")
-        print(f"    runsc:  {runsc_out}  {status}")
+        print(f"    runc:            {runc_out}")
+        print(f"    runc+限制参数:    {runc_restricted_out}")
+        print(f"    runsc:           {runsc_out}  {status}")
         print()
 
 else:
@@ -331,15 +347,23 @@ print(u.sysname)
 
     # runsc 模式
     r_runsc = _docker(["run", "--rm"] + RUNSC_ARGS + [PYTHON, "python", "-c", PY_CODE], timeout=15)
-    # runc 对比
-    r_runc = _docker(["run", "--rm"] + RUNC_ARGS + [PYTHON, "python", "-c", PY_CODE], timeout=15)
+    # runc 普通模式（标准 Docker）
+    r_runc = _docker(["run", "--rm", PYTHON, "python", "-c", PY_CODE], timeout=15)
+    # runc + 框架限制参数
+    r_runc_restricted = _docker(["run", "--rm"] + RUNC_ARGS + [PYTHON, "python", "-c", PY_CODE], timeout=15)
+    # runc + --privileged
+    r_runc_priv = _docker(["run", "--rm", "--privileged", PYTHON, "python", "-c", PY_CODE], timeout=15)
 
     runsc_release = _decode(r_runsc.stdout).strip().splitlines()[0] if r_runsc.returncode == 0 else "(error)"
     runc_release = _decode(r_runc.stdout).strip().splitlines()[0] if r_runc.returncode == 0 else "(error)"
+    runc_restricted_release = _decode(r_runc_restricted.stdout).strip().splitlines()[0] if r_runc_restricted.returncode == 0 else "(error)"
+    runc_priv_release = _decode(r_runc_priv.stdout).strip().splitlines()[0] if r_runc_priv.returncode == 0 else "(error)"
 
     print(f"  Python os.uname().release")
-    print(f"    runc:   {runc_release}  (宿主内核)")
-    print(f"    runsc:  {runsc_release}  (gVisor 虚拟内核)")
+    print(f"    runc:               {runc_release}  (标准 Docker)")
+    print(f"    runc+限制参数:       {runc_restricted_release}  (框架限制参数)")
+    print(f"    runc+priv:          {runc_priv_release}  (特权模式)")
+    print(f"    runsc:              {runsc_release}  (gVisor 虚拟内核)")
     print()
 
     if "4.19.0-gvisor" in runsc_release:
