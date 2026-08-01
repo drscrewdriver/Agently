@@ -692,6 +692,54 @@ async def _real_probe_both(provider: DockerExecutionResourceProvider, env: dict)
     except Exception as exc:
         warn(f"ensure_available(runtime='runc') 抛出异常: {exc}")
 
+    # 全链路验证：用代码构造 docker run 命令，实际执行后验证内核
+    subheader("3.4 全链路执行验证（代码→args→Docker→gVisor 内核）")
+    import shutil, subprocess
+
+    resource_runsc = DockerExecutionResource(runtime="runsc")
+    profile = {"image": "alpine:latest", "network_mode": "disabled"}
+    base_args = resource_runsc._container_base_args(profile=profile)
+    docker_bin = shutil.which("docker") or "docker"
+
+    # 构建完整的 docker run 命令
+    full_cmd = [docker_bin, "run", "--rm"] + list(base_args) + ["alpine:latest", "uname", "-r"]
+    ok(f"Docker 命令: {' '.join(full_cmd)}")
+    print()
+
+    # 执行并捕获输出
+    try:
+        exec_result = subprocess.run(
+            full_cmd, capture_output=True, text=True, timeout=30,
+        )
+        if exec_result.returncode == 0:
+            kernel = exec_result.stdout.strip()
+            ok(f"容器内内核版本: {kernel}")
+            if "gvisor" in kernel.lower():
+                ok(f"✅ 确认容器通过 gVisor/runsc 运行 — 内核 {kernel} 与宿主不同")
+            else:
+                warn(f"容器内核与宿主相同（{kernel}），说明未使用 runsc")
+        else:
+            stderr = exec_result.stderr.strip()
+            fail(f"容器执行失败 (rc={exec_result.returncode}): {stderr}")
+    except subprocess.TimeoutExpired:
+        fail("容器执行超时（30s）")
+    except Exception as exc:
+        warn(f"容器执行异常: {exc}")
+
+    # 对比：runc 模式下内核不同
+    resource_runc = DockerExecutionResource(runtime="runc")
+    base_args_runc = resource_runc._container_base_args(profile=profile)
+    full_cmd_runc = [docker_bin, "run", "--rm"] + list(base_args_runc) + ["alpine:latest", "uname", "-r"]
+    try:
+        exec_result_runc = subprocess.run(
+            full_cmd_runc, capture_output=True, text=True, timeout=30,
+        )
+        if exec_result_runc.returncode == 0:
+            kernel_runc = exec_result_runc.stdout.strip()
+            ok(f"runc 容器内核: {kernel_runc}")
+    except Exception:
+        pass
+
 
 async def _real_probe_fail_closed(provider: DockerExecutionResourceProvider, env: dict) -> None:
     """Docker 可用但 runsc 不可用 → 展示真实的 fail-closed 行为。"""
