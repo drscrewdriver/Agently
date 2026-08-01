@@ -63,6 +63,32 @@ def header(title: str) -> None:
     print(f"{'=' * width}\n")
 
 
+def _docker_env() -> dict[str, str]:
+    """返回不含 DOCKER_HOST 的干净环境，规避 tcp://docker:2375 等错误配置。"""
+    env = dict(os.environ)
+    env.pop("DOCKER_HOST", None)
+    env["DOCKER_HOST"] = "unix:///var/run/docker.sock"
+    return env
+
+
+def _docker_run(
+    docker_bin: str,
+    args: list[str],
+    image: str,
+    cmd_args: list[str],
+    timeout: int = 15,
+    privileged: bool = False,
+) -> subprocess.CompletedProcess:
+    """执行 docker run 命令，自动处理 DOCKER_HOST 环境问题。"""
+    cmd = [docker_bin, "run", "--rm"]
+    if privileged:
+        cmd.append("--privileged")
+    cmd.extend(args)
+    cmd.append(image)
+    cmd.extend(cmd_args)
+    return subprocess.run(cmd, capture_output=True, text=False, timeout=timeout, env=_docker_env())
+
+
 def run_code(
     runtime: str,
     image: str,
@@ -81,22 +107,11 @@ def run_code(
     base_args = resource._container_base_args(profile=profile)
 
     docker_bin = shutil.which("docker") or "docker"
-    cmd = [docker_bin, "run", "--rm"]
-
-    if privileged:
-        cmd.append("--privileged")
-
-    cmd.extend(base_args)
-
-    if interpreter:
-        cmd.extend([image] + interpreter + [code])
-    else:
-        cmd.extend([image, "sh", "-c", code])
-
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    cmd_args = interpreter + [code] if interpreter else ["sh", "-c", code]
+    return _docker_run(docker_bin, base_args, image, cmd_args, timeout=timeout, privileged=privileged)
 
 
-def run_cmd(runtime: str, image: str, cmd_args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+def run_cmd(runtime: str, image: str, cmd_args: list[str], timeout: int = 15, privileged: bool = False) -> subprocess.CompletedProcess:
     """通过框架的 _container_base_args 执行任意命令。"""
     from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
         DockerExecutionResource,
@@ -105,11 +120,7 @@ def run_cmd(runtime: str, image: str, cmd_args: list[str], timeout: int = 15) ->
     resource = DockerExecutionResource(runtime=runtime)
     profile = {"image": image, "network_mode": "disabled"}
     base_args = resource._container_base_args(profile=profile)
-
-    docker_bin = shutil.which("docker") or "docker"
-    cmd = [docker_bin, "run", "--rm"] + list(base_args) + [image] + cmd_args
-
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return _docker_run(shutil.which("docker") or "docker", base_args, image, cmd_args, timeout=timeout, privileged=privileged)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -120,13 +131,20 @@ header("Phase 1: 环境诊断")
 
 env: dict = {}
 
+# 1.0 DOCKER_HOST 检查
+_docker_host = os.environ.get("DOCKER_HOST", "")
+if _docker_host and "tcp://" in _docker_host:
+    warn(f"DOCKER_HOST={_docker_host} 可能导致容器连接失败，脚本将强制使用 unix socket")
+else:
+    ok(f"DOCKER_HOST 未设置或指向本地 socket")
+
 # 1.1 Docker
 docker_bin = shutil.which("docker") or ""
 env["docker_binary"] = docker_bin
 if docker_bin:
     ok(f"docker 位于 {docker_bin}")
     r = subprocess.run([docker_bin, "version", "--format", "{{.Server.Version}}"],
-                       capture_output=True, text=True, timeout=5)
+                       capture_output=True, text=True, timeout=5, env=_docker_env())
     env["docker_version"] = r.stdout.strip() if r.returncode == 0 else ""
     if env["docker_version"]:
         ok(f"Docker daemon 运行中，版本: {env['docker_version']}")
@@ -161,7 +179,7 @@ except Exception:
 # 1.4 检查 Docker 是否注册了 runsc 运行时
 if docker_bin and env.get("docker_version"):
     r = subprocess.run([docker_bin, "info", "--format", "{{json .Runtimes}}"],
-                       capture_output=True, text=True, timeout=5)
+                       capture_output=True, text=True, timeout=5, env=_docker_env())
     if r.returncode == 0:
         env["registered_runtimes"] = list(json.loads(r.stdout).keys())
         if "runsc" in env["registered_runtimes"]:
@@ -244,6 +262,14 @@ for name, result in tests:
 """)
 
 
+def _decode(out: bytes) -> str:
+    """安全解码二进制输出，处理非 UTF-8 字符。"""
+    try:
+        return out.decode("utf-8", errors="replace")
+    except Exception:
+        return out.decode("latin-1", errors="replace")
+
+
 def verify_python_kernel(runtime: str, label: str, privileged: bool = False) -> dict:
     """通过框架执行 Python 代码，读取内核参数。"""
     timeout = 20
@@ -260,17 +286,28 @@ def verify_python_kernel(runtime: str, label: str, privileged: bool = False) -> 
     except subprocess.TimeoutExpired:
         warn(f"  {label} 超时（{timeout}s）")
         return {}
+    except Exception as e:
+        warn(f"  {label} 错误: {e}")
+        # 打印原始输出用于诊断
+        for r, name in [(r1, "r1"), (r2, "r2"), (r3, "r3")]:
+            if r:
+                print(f"    {name} stdout={_decode(r.stdout)[:100]}")
+                print(f"    {name} stderr={_decode(r.stderr)[:100]}")
+        return {}
 
     result = {}
-    for line in r1.stdout.strip().splitlines():
+    output = _decode(r1.stdout)
+    for line in output.strip().splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             result[k] = v
-    for line in r2.stdout.strip().splitlines():
+    output = _decode(r2.stdout)
+    for line in output.strip().splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             result[k] = v
-    for line in r3.stdout.strip().splitlines():
+    output = _decode(r3.stdout)
+    for line in output.strip().splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             result[k] = v
@@ -417,20 +454,21 @@ if env.get("docker_version") and env["runsc_available"]:
     ]
 
     for label, bash_cmd, expect_block in syscall_tests:
-        # runc + --privileged
+        # runc 普通模式
         r_runc = run_cmd("runc", ALPINE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
-        r_runc_priv = subprocess.run(
-            [shutil.which("docker") or "docker", "run", "--rm", "--privileged",
-             ALPINE_IMAGE, "sh", "-c", bash_cmd],
-            capture_output=True, text=True, timeout=10,
-        )
-
+        # runc + --privileged（直接 docker run，不走框架 args）
+        _db = shutil.which("docker") or "docker"
+        r_runc_priv = _docker_run(_db, ["--privileged"], ALPINE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
         # runsc + --privileged（通过框架路径）
-        r_runsc_priv = run_cmd("runsc", ALPINE_IMAGE, ["sh", "-c", bash_cmd], timeout=10)
+        r_runsc_priv = run_cmd("runsc", ALPINE_IMAGE, ["sh", "-c", bash_cmd], timeout=10, privileged=True)
 
-        output_runc = (r_runc.stdout.strip() or r_runc.stderr.strip())[:60]
-        output_runc_priv = (r_runc_priv.stdout.strip() or r_runc_priv.stderr.strip())[:60]
-        output_runsc = (r_runsc_priv.stdout.strip() or r_runsc_priv.stderr.strip())[:60]
+        def _trim(out: bytes) -> str:
+            s = _decode(out).strip()
+            return s[:60] if s else "(ok)"
+
+        output_runc = _trim(r_runc.stderr or r_runc.stdout)
+        output_runc_priv = _trim(r_runc_priv.stderr or r_runc_priv.stdout)
+        output_runsc = _trim(r_runsc_priv.stderr or r_runsc_priv.stdout)
 
         blocked = expect_block.split(":")[0].lower() in output_runsc.lower()
 
